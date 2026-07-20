@@ -1,0 +1,27 @@
+{
+  "name": "noise",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@vitejs/plugin-react": "^6.0.3",
+    "playwright": "^1.61.1",
+    "vite": "^8.1.5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.6.1",
+    "leva": "^0.10.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "three": "^0.185.1",
+    "vercel": "^56.4.0"
+  }
+}
