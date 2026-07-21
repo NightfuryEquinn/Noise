@@ -247,6 +247,8 @@ export function LoadingScreen({ ready, onExplore }: LoadingScreenProps) {
 
     // Maps pointer position into the same UV space the shader uses
     function onPointerMove(e: PointerEvent): void {
+      if (!canvas) return;
+
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
