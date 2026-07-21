@@ -139,6 +139,40 @@ float fbm4(vec4 p, int octaves, float lacunarity, float persistence){
   return sum / max(norm, 1e-5);
 }
 
+// --- Ridged multi-fractal (1 - |noise|, sharpened) ---------------------------
+// Output remapped to ~[-1, 1] so displacement matches standard fBm.
+float ridged3(vec3 p, int octaves, float lacunarity, float persistence){
+  float sum = 0.0;
+  float amp = 1.0;
+  float norm = 0.0;
+  for (int i = 0; i < 8; i++){
+    if (i >= octaves) break;
+    float n = 1.0 - abs(snoise3(p));
+    n = n * n;
+    sum  += amp * n;
+    norm += amp;
+    p    *= lacunarity;
+    amp  *= persistence;
+  }
+  return (sum / max(norm, 1e-5)) * 2.0 - 1.0;
+}
+
+float ridged4(vec4 p, int octaves, float lacunarity, float persistence){
+  float sum = 0.0;
+  float amp = 1.0;
+  float norm = 0.0;
+  for (int i = 0; i < 8; i++){
+    if (i >= octaves) break;
+    float n = 1.0 - abs(snoise4(p));
+    n = n * n;
+    sum  += amp * n;
+    norm += amp;
+    p    *= lacunarity;
+    amp  *= persistence;
+  }
+  return (sum / max(norm, 1e-5)) * 2.0 - 1.0;
+}
+
 // --- Box-Muller Gaussian remap -----------------------------------------------
 // Treats two independent noise samples as ~uniform U1, U2 on (0,1] and returns
 // a normally-distributed sample. Scaled so output ranges ~[-1,1] for displacement.
@@ -164,6 +198,7 @@ uniform float uPersistence;
 uniform float uTimeSpeed;
 uniform int   uDimensions;   // 3 or 4
 uniform int   uGaussian;     // 0 / 1
+uniform int   uNoiseStyle;   // 0 fbm, 1 ridged
 uniform float uSeed;
 
 // layers
@@ -187,28 +222,55 @@ varying vec3  vAnalyticalN;
 ${NOISE_GLSL}
 
 float sampleBase(vec3 p, float t){
+  float result = 0.0;
+
   if (uDimensions == 4){
-    return fbm4(vec4(p * uFrequency, t * uTimeSpeed + uSeed), uOctaves, uLacunarity, uPersistence);
+    vec4 q = vec4(p * uFrequency, t * uTimeSpeed + uSeed);
+    if (uNoiseStyle == 1){
+      result = ridged4(q, uOctaves, uLacunarity, uPersistence);
+    } else {
+      result = fbm4(q, uOctaves, uLacunarity, uPersistence);
+    }
   } else {
     vec3 q = p * uFrequency + vec3(0.0, 0.0, 1.0) * t * uTimeSpeed + vec3(uSeed);
-    return fbm3(q, uOctaves, uLacunarity, uPersistence);
+    if (uNoiseStyle == 1){
+      result = ridged3(q, uOctaves, uLacunarity, uPersistence);
+    } else {
+      result = fbm3(q, uOctaves, uLacunarity, uPersistence);
+    }
   }
+
+  return result;
 }
 
 float sampleDetail(vec3 p, float t){
-  // small fixed-octave fBm for the detail layer
+  // small fixed-octave noise for the detail layer (matches base style)
+  float result = 0.0;
+
   if (uDimensions == 4){
-    return fbm4(vec4(p * uDetailFreq, t * uTimeSpeed + uSeed + 13.7), 2, 2.0, 0.5);
+    vec4 q = vec4(p * uDetailFreq, t * uTimeSpeed + uSeed + 13.7);
+    if (uNoiseStyle == 1){
+      result = ridged4(q, 2, 2.0, 0.5);
+    } else {
+      result = fbm4(q, 2, 2.0, 0.5);
+    }
   } else {
     vec3 q = p * uDetailFreq + vec3(0.0, 0.0, 1.0) * t * uTimeSpeed + vec3(uSeed + 13.7);
-    return fbm3(q, 2, 2.0, 0.5);
+    if (uNoiseStyle == 1){
+      result = ridged3(q, 2, 2.0, 0.5);
+    } else {
+      result = fbm3(q, 2, 2.0, 0.5);
+    }
   }
+
+  return result;
 }
 
 float layeredNoise(vec3 p, float t){
   // --- layer 1 : domain warp (offsets the input of layer 2) ---
   if (uWarpOn == 1){
-    vec3 q = p * uWarpFreq + vec3(uSeed);
+    // Drift the warp domain over time so liquid / portal / matter actually flow
+    vec3 q = p * uWarpFreq + vec3(uSeed) + vec3(0.0, 0.0, 1.0) * t * uTimeSpeed;
     vec3 w = vec3(
       snoise3(q),
       snoise3(q + vec3(5.2, 1.3, 7.4)),
@@ -292,10 +354,13 @@ precision highp float;
 
 uniform vec3  uColorA;
 uniform vec3  uColorB;
+uniform vec3  uColorC;
+uniform vec3  uColorD;
 uniform vec3  uBgColor;
 uniform int   uColorMode;     // 0 gradient, 1 normal, 2 bands, 3 solid
 uniform float uBands;
 uniform float uTime;
+uniform float uEmissive;
 
 // lighting
 uniform float uAmbient;
@@ -336,6 +401,22 @@ float lightAttenuation(float dist){
   return (1.0 - x) * (1.0 - x);
 }
 
+// Four-stop piecewise gradient: A → C → D → B
+vec3 gradient4(float t){
+  float x = clamp(t, 0.0, 1.0);
+  vec3 col;
+
+  if (x < 0.333){
+    col = mix(uColorA, uColorC, smoothstep(0.0, 0.333, x));
+  } else if (x < 0.666){
+    col = mix(uColorC, uColorD, smoothstep(0.333, 0.666, x));
+  } else {
+    col = mix(uColorD, uColorB, smoothstep(0.666, 1.0, x));
+  }
+
+  return col;
+}
+
 void main(){
   // analytical displaced surface normal (smooth per-vertex), blended with the
   // pre-displacement mesh normal for the 'normal blend' smoothing tweak.
@@ -348,7 +429,7 @@ void main(){
 
   vec3 base;
   if (uColorMode == 0){
-    base = mix(uColorA, uColorB, smoothstep(0.0, 1.0, t));
+    base = gradient4(t);
   } else if (uColorMode == 1){
     base = N * 0.5 + 0.5;
   } else if (uColorMode == 2){
@@ -358,6 +439,9 @@ void main(){
   } else {
     base = uColorA;
   }
+
+  // Self-glow for hot looks (sun / portal); water / matter keep this near 0
+  base *= 1.0 + t * uEmissive;
 
   vec3 V = normalize(cameraPosition - vWorldPos);
   float ndv = max(dot(N, V), 0.0);

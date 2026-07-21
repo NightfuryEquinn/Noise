@@ -11,6 +11,8 @@ const CASES = [
   { set: { persistence: 0.2 }, uniform: 'uPersistence', expect: 0.2 },
   { set: { timeSpeed: 1.4 }, uniform: 'uTimeSpeed', expect: 1.4 },
   { set: { dimensions: 4 }, uniform: 'uDimensions', expect: 4 },
+  { set: { noiseStyle: 'ridged' }, uniform: 'uNoiseStyle', expect: 1 },
+  { set: { noiseStyle: 'fbm' }, uniform: 'uNoiseStyle', expect: 0 },
   { set: { gaussian: true }, uniform: 'uGaussian', expect: 1 },
   { set: { seed: 42.5 }, uniform: 'uSeed', expect: 42.5 },
 
@@ -97,7 +99,9 @@ async function main() {
 
   // Reset first
   await page.evaluate(() => window.__setNoiseControls({
+    look: 'studio',
     object: 'sphere', detail: 128, wireframe: false, dimensions: 3,
+    noiseStyle: 'fbm',
     frequency: 1.6, amplitude: 0.22, octaves: 3, lacunarity: 2.0,
     persistence: 0.55, timeSpeed: 0.35, gaussian: false, seed: 0,
     warpOn: false, warpFreq: 1.2, warpStrength: 0.45, detailOn: false,
@@ -137,26 +141,36 @@ async function main() {
 
   // Key direction from az/el
   await page.evaluate(() => window.__setNoiseControls({ keyAz: 90, keyEl: 30 }));
-  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => {
+      const v = window.__noiseUniforms?.uKeyDir?.value;
+      if (!v) return false;
+      return Math.abs(v.x - (90 * Math.PI) / 180) < 1e-4 && Math.abs(v.y - (30 * Math.PI) / 180) < 1e-4;
+    },
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const keyDir = await readUniform(page, 'uKeyDir');
   const azOk = nearly(keyDir.x, (90 * Math.PI) / 180);
   const elOk = nearly(keyDir.y, (30 * Math.PI) / 180);
   results.push({ name: 'keyAz/keyEl → uKeyDir', ok: azOk && elOk, expect: 'rad', got: keyDir });
 
-  // Palette colors
+  // Palette colors (Three ColorManagement stores sRGB hex as linear channel values)
   await page.evaluate(() => window.__setNoiseControls({ palette: 'magma' }));
-  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => {
+      const c = window.__noiseUniforms?.uColorB?.value;
+      return c && Math.abs(c.r - 1) < 0.02 && c.g > 0.35 && c.g < 0.5 && c.b > 0.04 && c.b < 0.08;
+    },
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const colorB = await readUniform(page, 'uColorB');
-  // #ffae42
   const magmaOk =
-    nearly(colorB.r, 1, 0.02) && nearly(colorB.g, 174 / 255, 0.02) && nearly(colorB.b, 66 / 255, 0.02);
-  results.push({ name: 'palette magma → uColorB', ok: magmaOk, expect: '#ffae42', got: colorB });
+    nearly(colorB.r, 1, 0.02) && colorB.g > 0.35 && colorB.g < 0.5 && colorB.b > 0.04 && colorB.b < 0.08;
+  results.push({ name: 'palette magma → uColorB', ok: magmaOk, expect: '#ffae42 linear', got: colorB });
 
-  // Light preset
-  await page.evaluate(() => window.__setNoiseControls({ lightPreset: 'wax' }));
-  await page.waitForTimeout(80);
-  // Trigger onChange by setting via path — lightPreset onChange only fires from panel.
-  // Apply preset values directly to mimic button path used by UI handler:
+  // Light preset values applied directly (onChange may not fire via store.set)
   await page.evaluate(() =>
     window.__setNoiseControls({
       ambient: 0.1,
@@ -168,13 +182,24 @@ async function main() {
       specPower: 48,
     }),
   );
-  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => Math.abs((window.__noiseUniforms?.uSpec?.value ?? -1) - 0.7) < 1e-4,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const waxSpec = await readUniform(page, 'uSpec');
   results.push({ name: 'wax lighting values → uSpec', ok: nearly(waxSpec, 0.7), expect: 0.7, got: waxSpec });
 
   // Scene / object state (not uniforms)
   await page.evaluate(() => window.__setNoiseControls({ object: 'torus', wireframe: true, autoRotate: false }));
-  await page.waitForTimeout(80);
+  await page.waitForFunction(
+    () =>
+      window.__noiseState?.object === 'torus' &&
+      window.__noiseState?.wireframe === true &&
+      window.__noiseState?.autoRotate === false,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const object = await readState(page, 'object');
   const wireframe = await readState(page, 'wireframe');
   const autoRotate = await readState(page, 'autoRotate');
@@ -186,7 +211,11 @@ async function main() {
   await page.evaluate(() =>
     window.__setNoiseControls({ bloomOn: true, bloomStrength: 1.5, bloomRadius: 0.9, bloomThreshold: 0.2 }),
   );
-  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => Math.abs((window.__noiseState?.bloomStrength ?? -1) - 1.5) < 1e-4,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const bloomStrength = await readState(page, 'bloomStrength');
   results.push({
     name: 'bloomStrength state',
@@ -195,7 +224,7 @@ async function main() {
     got: bloomStrength,
   });
 
-  // Reset all via setControls(DEFAULTS equivalent)
+  // Reset frequency via setControls
   await page.evaluate(() =>
     window.__setNoiseControls({
       frequency: 1.6,
@@ -205,23 +234,38 @@ async function main() {
       warpOn: false,
     }),
   );
-  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => Math.abs((window.__noiseUniforms?.uFrequency?.value ?? -1) - 1.6) < 1e-4,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const freq = await readUniform(page, 'uFrequency');
   results.push({ name: 'reset frequency', ok: nearly(freq, 1.6), expect: 1.6, got: freq });
 
   // Leva get round-trip
   await page.evaluate(() => window.__setNoiseControls({ frequency: 2.75 }));
-  await page.waitForTimeout(30);
+  await page.waitForFunction(
+    () => Math.abs((window.__getLeva?.('frequency') ?? -1) - 2.75) < 1e-4,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const levaFreq = await page.evaluate(() => window.__getLeva('frequency'));
   results.push({ name: 'leva get frequency', ok: nearly(levaFreq, 2.75), expect: 2.75, got: levaFreq });
 
   // Click Leva "new seed" and "reset all" buttons if present
-  const newSeed = page.getByRole('button', { name: /new seed/i });
-  const resetAll = page.getByRole('button', { name: /reset all/i });
+  const newSeed = page.getByRole('button', { name: /^new seed$/i });
+  const resetAll = page.getByRole('button', { name: /^reset all$/i });
   if (await newSeed.count()) {
     const before = await readUniform(page, 'uSeed');
     await newSeed.click();
-    await page.waitForTimeout(80);
+    await page.waitForFunction(
+      (prev) => {
+        const v = window.__noiseUniforms?.uSeed?.value;
+        return typeof v === 'number' && Math.abs(v - prev) > 1e-6;
+      },
+      before,
+      { timeout: 3000 },
+    ).catch(() => null);
     const after = await readUniform(page, 'uSeed');
     results.push({
       name: 'UI new seed button',
@@ -235,9 +279,19 @@ async function main() {
 
   if (await resetAll.count()) {
     await page.evaluate(() => window.__setNoiseControls({ frequency: 5, amplitude: 0.6 }));
-    await page.waitForTimeout(40);
+    await page.waitForFunction(
+      () => Math.abs((window.__noiseUniforms?.uFrequency?.value ?? -1) - 5) < 1e-4,
+      null,
+      { timeout: 3000 },
+    ).catch(() => null);
     await resetAll.click();
-    await page.waitForTimeout(100);
+    await page.waitForFunction(
+      () =>
+        Math.abs((window.__noiseUniforms?.uFrequency?.value ?? -1) - 1.6) < 1e-4 &&
+        Math.abs((window.__noiseUniforms?.uAmplitude?.value ?? -1) - 0.22) < 1e-4,
+      null,
+      { timeout: 3000 },
+    ).catch(() => null);
     const rf = await readUniform(page, 'uFrequency');
     const ra = await readUniform(page, 'uAmplitude');
     results.push({
@@ -250,10 +304,7 @@ async function main() {
     results.push({ name: 'UI reset all button', ok: false, expect: 'present', got: 'missing' });
   }
 
-  // Light preset via panel select — open Lighting and change preset
-  // Fallback: call onChange path by setting lightPreset through leva after ensuring handler works.
-  // Simulate selecting 'rim' by setting the control; onChange may not fire via store.set.
-  // Verify store path works for lighting fields used by presets:
+  // Rim lighting values
   await page.evaluate(() =>
     window.__setNoiseControls({
       ambient: 0.05,
@@ -265,9 +316,45 @@ async function main() {
       specPower: 24,
     }),
   );
-  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => Math.abs((window.__noiseUniforms?.uRimIntensity?.value ?? -1) - 1.4) < 1e-4,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
   const rimU = await readUniform(page, 'uRimIntensity');
   results.push({ name: 'rim preset values → uRimIntensity', ok: nearly(rimU, 1.4), expect: 1.4, got: rimU });
+
+  // Look / ridged noise values applied directly (onChange may not fire via store.set)
+  await page.evaluate(() =>
+    window.__setNoiseControls({
+      look: 'ridge magma',
+      noiseStyle: 'ridged',
+      palette: 'magma',
+      frequency: 2.1,
+      amplitude: 0.28,
+    }),
+  );
+  await page.waitForFunction(
+    () =>
+      Math.abs((window.__noiseUniforms?.uNoiseStyle?.value ?? -1) - 1) < 1e-4 &&
+      Math.abs((window.__noiseUniforms?.uAmplitude?.value ?? -1) - 0.28) < 1e-4,
+    null,
+    { timeout: 3000 },
+  ).catch(() => null);
+  const ridgeStyle = await readUniform(page, 'uNoiseStyle');
+  const ridgeAmp = await readUniform(page, 'uAmplitude');
+  results.push({
+    name: 'ridge magma look → uNoiseStyle',
+    ok: nearly(ridgeStyle, 1),
+    expect: 1,
+    got: ridgeStyle,
+  });
+  results.push({
+    name: 'ridge magma look → uAmplitude',
+    ok: nearly(ridgeAmp, 0.28),
+    expect: 0.28,
+    got: ridgeAmp,
+  });
 
   await browser.close();
 
